@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Windowater</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
+    #view {
+      position: absolute; top: 0; left: 0;
+      image-rendering: pixelated;
+      cursor: crosshair;
+      touch-action: none;
+    }
+    #ui {
+      position: absolute; top: 8px; left: 8px;
+      display: flex; gap: 6px; align-items: center;
+      font: 12px system-ui, sans-serif; color: #8b949e;
+      pointer-events: none;
+    }
+    #ui button {
+      pointer-events: auto;
+      font: inherit; color: #e6edf3; background: #21262d;
+      border: 1px solid #30363d; border-radius: 4px; padding: 3px 8px; cursor: pointer;
+    }
+    #ui button:hover { background: #30363d; }
+    #ui a { pointer-events: auto; color: #58a6ff; text-decoration: none; }
+    #ui a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="ui">
+    <button id="spawn">New window</button>
+    <button id="clear">Clear</button>
+    <a id="mode"></a>
+    <span>left-drag: pour · right-drag: erase</span>
+    <span id="stats"></span>
+  </div>
+  <script src="main.js"></script>
+</body>
+</html>
