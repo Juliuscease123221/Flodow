@@ -277,11 +277,13 @@ function simulate(active) {
 
   // Walls in local coordinates, snapped to grid lines so particles and the
   // pressure solve agree on where the walls are; with each edge's velocity.
-  const snap = (x) => Math.round(x / H) * H;
+  // Snapped outward, so water always reaches the visible window edge (the
+  // part past it, under H px, is just hidden).
+  const down = (x) => Math.floor(x / H) * H, up = (x) => Math.ceil(x / H) * H;
   const walls = [];
   for (const c of active) {
     const w = {
-      l: snap(c.px.l - ox), t: snap(c.px.t - oy), r: snap(c.px.r - ox), b: snap(c.px.b - oy),
+      l: down(c.px.l - ox), t: down(c.px.t - oy), r: up(c.px.r - ox), b: up(c.px.b - oy),
       el: c.edge.l, er: c.edge.r, et: c.edge.t, eb: c.edge.b,
     };
     if (w.r > w.l && w.b > w.t) walls.push(w);
@@ -303,10 +305,9 @@ function simulate(active) {
     integrate(na, dt);
     if (s === 0) separate(na); // the most expensive part; once per frame is enough
     collide(na, walls);
-    transfer(na, true);
-    updateDensity(na);
+    particlesToGrid(na);
     solve();
-    transfer(na, false);
+    gridToParticles(na);
   }
 
   for (let i = 0; i < na; i++) {
@@ -423,112 +424,153 @@ function collide(na, walls) {
   }
 }
 
-// Particle <-> grid velocity transfer (bilinear on the staggered MAC grid).
-function transfer(na, toGrid) {
+// Particles -> grid, in one pass over the particles: mark fluid cells, splat
+// both velocity components onto the staggered MAC grid (u on vertical faces,
+// v on horizontal faces), and accumulate particle density at cell centers.
+function particlesToGrid(na) {
   const n = ny, inv = 1 / H, h2 = 0.5 * H, size = nx * ny;
+  const xMax = (nx - 1) * H, yMax = (ny - 1) * H;
 
-  if (toGrid) {
-    u.fill(0, 0, size); v.fill(0, 0, size);
-    du.fill(0, 0, size); dv.fill(0, 0, size);
-    for (let i = 0; i < size; i++) cellType[i] = solid[i] === 0 ? SOLID : AIR;
-    for (let i = 0; i < na; i++) {
-      const xi = clamp(Math.floor(pos[2 * i] * inv), 0, nx - 1);
-      const yi = clamp(Math.floor(pos[2 * i + 1] * inv), 0, ny - 1);
-      const c = xi * n + yi;
-      if (cellType[c] === AIR) cellType[c] = FLUID;
+  u.fill(0, 0, size); v.fill(0, 0, size);
+  du.fill(0, 0, size); dv.fill(0, 0, size);
+  density.fill(0, 0, size);
+  for (let i = 0; i < size; i++) cellType[i] = solid[i] === 0 ? SOLID : AIR;
+
+  for (let i = 0; i < na; i++) {
+    const px = pos[2 * i], py = pos[2 * i + 1];
+
+    const c = clamp(Math.floor(px * inv), 0, nx - 1) * n + clamp(Math.floor(py * inv), 0, ny - 1);
+    if (cellType[c] === AIR) cellType[c] = FLUID;
+
+    const cx = clamp(px, H, xMax), cy = clamp(py, H, yMax);
+
+    // u: sampled at (i*H, (j+0.5)*H)
+    {
+      const x = cx, y = cy - h2;
+      const x0 = Math.min(Math.floor(x * inv), nx - 2), tx = (x - x0 * H) * inv, x1 = Math.min(x0 + 1, nx - 2);
+      const y0 = Math.min(Math.floor(y * inv), ny - 2), ty = (y - y0 * H) * inv, y1 = Math.min(y0 + 1, ny - 2);
+      const sx = 1 - tx, sy = 1 - ty;
+      const d0 = sx * sy, d1 = tx * sy, d2 = tx * ty, d3 = sx * ty;
+      const n0 = x0 * n + y0, n1 = x1 * n + y0, n2 = x1 * n + y1, n3 = x0 * n + y1;
+      const pv = vel[2 * i];
+      u[n0] += pv * d0; du[n0] += d0;
+      u[n1] += pv * d1; du[n1] += d1;
+      u[n2] += pv * d2; du[n2] += d2;
+      u[n3] += pv * d3; du[n3] += d3;
+    }
+    // v: sampled at ((i+0.5)*H, j*H)
+    {
+      const x = cx - h2, y = cy;
+      const x0 = Math.min(Math.floor(x * inv), nx - 2), tx = (x - x0 * H) * inv, x1 = Math.min(x0 + 1, nx - 2);
+      const y0 = Math.min(Math.floor(y * inv), ny - 2), ty = (y - y0 * H) * inv, y1 = Math.min(y0 + 1, ny - 2);
+      const sx = 1 - tx, sy = 1 - ty;
+      const d0 = sx * sy, d1 = tx * sy, d2 = tx * ty, d3 = sx * ty;
+      const n0 = x0 * n + y0, n1 = x1 * n + y0, n2 = x1 * n + y1, n3 = x0 * n + y1;
+      const pv = vel[2 * i + 1];
+      v[n0] += pv * d0; dv[n0] += d0;
+      v[n1] += pv * d1; dv[n1] += d1;
+      v[n2] += pv * d2; dv[n2] += d2;
+      v[n3] += pv * d3; dv[n3] += d3;
+    }
+    // density: sampled at cell centers
+    {
+      const x = cx - h2, y = cy - h2;
+      const x0 = Math.floor(x * inv), tx = (x - x0 * H) * inv, x1 = Math.min(x0 + 1, nx - 2);
+      const y0 = Math.floor(y * inv), ty = (y - y0 * H) * inv, y1 = Math.min(y0 + 1, ny - 2);
+      const sx = 1 - tx, sy = 1 - ty;
+      if (x0 < nx && y0 < ny) density[x0 * n + y0] += sx * sy;
+      if (x1 < nx && y0 < ny) density[x1 * n + y0] += tx * sy;
+      if (x1 < nx && y1 < ny) density[x1 * n + y1] += tx * ty;
+      if (x0 < nx && y1 < ny) density[x0 * n + y1] += sx * ty;
     }
   }
 
-  for (let comp = 0; comp < 2; comp++) {
-    const dx = comp === 0 ? 0 : h2, dy = comp === 0 ? h2 : 0;
-    const f = comp === 0 ? u : v, prevF = comp === 0 ? prevU : prevV, d = comp === 0 ? du : dv;
-    const off = comp === 0 ? n : 1;
+  for (let i = 0; i < size; i++) if (du[i] > 0) u[i] /= du[i];
+  for (let i = 0; i < size; i++) if (dv[i] > 0) v[i] /= dv[i];
 
-    for (let i = 0; i < na; i++) {
-      const x = clamp(pos[2 * i], H, (nx - 1) * H) - dx;
-      const y = clamp(pos[2 * i + 1], H, (ny - 1) * H) - dy;
+  // Faces touching a wall carry no flow.
+  for (let i = 0; i < nx; i++) {
+    for (let j = 0; j < ny; j++) {
+      const c = i * n + j;
+      const s = cellType[c] === SOLID;
+      if (s || (i > 0 && cellType[c - n] === SOLID)) u[c] = 0;
+      if (s || (j > 0 && cellType[c - 1] === SOLID)) v[c] = 0;
+    }
+  }
+}
+
+// Grid -> particles: blend PIC (grid velocity) and FLIP (particle velocity
+// plus the grid's change), sampling only faces next to fluid or wall cells.
+function gridToParticles(na) {
+  const n = ny, inv = 1 / H, h2 = 0.5 * H;
+  const xMax = (nx - 1) * H, yMax = (ny - 1) * H;
+
+  for (let i = 0; i < na; i++) {
+    const cx = clamp(pos[2 * i], H, xMax), cy = clamp(pos[2 * i + 1], H, yMax);
+    for (let comp = 0; comp < 2; comp++) {
+      const f = comp === 0 ? u : v, prevF = comp === 0 ? prevU : prevV;
+      const off = comp === 0 ? n : 1;
+      const x = comp === 0 ? cx : cx - h2, y = comp === 0 ? cy - h2 : cy;
       const x0 = Math.min(Math.floor(x * inv), nx - 2), tx = (x - x0 * H) * inv, x1 = Math.min(x0 + 1, nx - 2);
       const y0 = Math.min(Math.floor(y * inv), ny - 2), ty = (y - y0 * H) * inv, y1 = Math.min(y0 + 1, ny - 2);
       const sx = 1 - tx, sy = 1 - ty;
       const d0 = sx * sy, d1 = tx * sy, d2 = tx * ty, d3 = sx * ty;
       const n0 = x0 * n + y0, n1 = x1 * n + y0, n2 = x1 * n + y1, n3 = x0 * n + y1;
 
-      if (toGrid) {
-        const pv = vel[2 * i + comp];
-        f[n0] += pv * d0; d[n0] += d0;
-        f[n1] += pv * d1; d[n1] += d1;
-        f[n2] += pv * d2; d[n2] += d2;
-        f[n3] += pv * d3; d[n3] += d3;
-      } else {
-        // Only sample faces next to fluid or wall cells.
-        const v0 = cellType[n0] !== AIR || cellType[n0 - off] !== AIR ? 1 : 0;
-        const v1 = cellType[n1] !== AIR || cellType[n1 - off] !== AIR ? 1 : 0;
-        const v2 = cellType[n2] !== AIR || cellType[n2 - off] !== AIR ? 1 : 0;
-        const v3 = cellType[n3] !== AIR || cellType[n3 - off] !== AIR ? 1 : 0;
-        const w = v0 * d0 + v1 * d1 + v2 * d2 + v3 * d3;
-        if (w > 0) {
-          const pic = (v0 * d0 * f[n0] + v1 * d1 * f[n1] + v2 * d2 * f[n2] + v3 * d3 * f[n3]) / w;
-          const corr = (v0 * d0 * (f[n0] - prevF[n0]) + v1 * d1 * (f[n1] - prevF[n1]) +
-                        v2 * d2 * (f[n2] - prevF[n2]) + v3 * d3 * (f[n3] - prevF[n3])) / w;
-          const flip = vel[2 * i + comp] + corr;
-          vel[2 * i + comp] = (1 - FLIP_RATIO) * pic + FLIP_RATIO * flip;
-        }
+      const v0 = cellType[n0] !== AIR || cellType[n0 - off] !== AIR ? 1 : 0;
+      const v1 = cellType[n1] !== AIR || cellType[n1 - off] !== AIR ? 1 : 0;
+      const v2 = cellType[n2] !== AIR || cellType[n2 - off] !== AIR ? 1 : 0;
+      const v3 = cellType[n3] !== AIR || cellType[n3 - off] !== AIR ? 1 : 0;
+      const w = v0 * d0 + v1 * d1 + v2 * d2 + v3 * d3;
+      if (w > 0) {
+        const pic = (v0 * d0 * f[n0] + v1 * d1 * f[n1] + v2 * d2 * f[n2] + v3 * d3 * f[n3]) / w;
+        const corr = (v0 * d0 * (f[n0] - prevF[n0]) + v1 * d1 * (f[n1] - prevF[n1]) +
+                      v2 * d2 * (f[n2] - prevF[n2]) + v3 * d3 * (f[n3] - prevF[n3])) / w;
+        const flip = vel[2 * i + comp] + corr;
+        vel[2 * i + comp] = (1 - FLIP_RATIO) * pic + FLIP_RATIO * flip;
       }
     }
-
-    if (toGrid) for (let i = 0; i < size; i++) if (d[i] > 0) f[i] /= d[i];
-  }
-
-  if (toGrid) {
-    // Faces touching a wall carry no flow.
-    for (let i = 0; i < nx; i++) {
-      for (let j = 0; j < ny; j++) {
-        const c = i * n + j;
-        const s = cellType[c] === SOLID;
-        if (s || (i > 0 && cellType[c - n] === SOLID)) u[c] = 0;
-        if (s || (j > 0 && cellType[c - 1] === SOLID)) v[c] = 0;
-      }
-    }
-  }
-}
-
-function updateDensity(na) {
-  const n = ny, inv = 1 / H, h2 = 0.5 * H;
-  density.fill(0, 0, nx * ny);
-  for (let i = 0; i < na; i++) {
-    const x = clamp(pos[2 * i], H, (nx - 1) * H) - h2;
-    const y = clamp(pos[2 * i + 1], H, (ny - 1) * H) - h2;
-    const x0 = Math.floor(x * inv), tx = (x - x0 * H) * inv, x1 = Math.min(x0 + 1, nx - 2);
-    const y0 = Math.floor(y * inv), ty = (y - y0 * H) * inv, y1 = Math.min(y0 + 1, ny - 2);
-    const sx = 1 - tx, sy = 1 - ty;
-    if (x0 < nx && y0 < ny) density[x0 * n + y0] += sx * sy;
-    if (x1 < nx && y0 < ny) density[x1 * n + y0] += tx * sy;
-    if (x1 < nx && y1 < ny) density[x1 * n + y1] += tx * ty;
-    if (x0 < nx && y1 < ny) density[x0 * n + y1] += sx * ty;
   }
 }
 
 // Gauss-Seidel pressure projection with drift correction for packed cells.
+// The fluid cells and their per-cell constants (open neighbours, drift) are
+// gathered once, so the iterations only touch water.
+let fluidCap = 0, fluidIdx, fluidS, fluidDrift;
 function solve() {
   const n = ny, size = nx * ny;
   prevU.set(u.subarray(0, size));
   prevV.set(v.subarray(0, size));
+
+  if (size > fluidCap) {
+    fluidCap = gridCap;
+    fluidIdx = new Int32Array(fluidCap);
+    fluidS = new Float32Array(fluidCap);
+    fluidDrift = new Float64Array(fluidCap);
+  }
+  let nf = 0;
+  for (let i = 1; i < nx - 1; i++) {
+    for (let j = 1; j < ny - 1; j++) {
+      const c = i * n + j;
+      if (cellType[c] !== FLUID) continue;
+      const s = solid[c - n] + solid[c + n] + solid[c - 1] + solid[c + 1];
+      if (s === 0) continue;
+      const compression = density[c] - REST_DENSITY;
+      fluidIdx[nf] = c;
+      fluidS[nf] = s;
+      fluidDrift[nf] = compression > 0 ? DRIFT_K * compression : 0;
+      nf++;
+    }
+  }
+
   for (let iter = 0; iter < PRESSURE_ITERS; iter++) {
-    for (let i = 1; i < nx - 1; i++) {
-      for (let j = 1; j < ny - 1; j++) {
-        const c = i * n + j;
-        if (cellType[c] !== FLUID) continue;
-        const l = c - n, r = c + n, b = c - 1, t = c + 1;
-        const sx0 = solid[l], sx1 = solid[r], sy0 = solid[b], sy1 = solid[t];
-        const s = sx0 + sx1 + sy0 + sy1;
-        if (s === 0) continue;
-        let div = u[r] - u[c] + v[t] - v[c];
-        const compression = density[c] - REST_DENSITY;
-        if (compression > 0) div -= DRIFT_K * compression;
-        const p = (-div / s) * OVER_RELAX;
-        u[c] -= sx0 * p; u[r] += sx1 * p;
-        v[c] -= sy0 * p; v[t] += sy1 * p;
-      }
+    for (let k = 0; k < nf; k++) {
+      const c = fluidIdx[k];
+      const r = c + n, t = c + 1;
+      const div = u[r] - u[c] + v[t] - v[c] - fluidDrift[k];
+      const p = (-div / fluidS[k]) * OVER_RELAX;
+      u[c] -= solid[c - n] * p; u[r] += solid[r] * p;
+      v[c] -= solid[c - 1] * p; v[t] += solid[t] * p;
     }
   }
 }
@@ -536,7 +578,75 @@ function solve() {
 // ------------------------------------------------------------------ output
 
 // Splat particles onto the render grid once, then send each window its slice.
-// Cell values: 1 = water, 2 = fast-moving water (foam).
+// Cell byte: 0 = air; otherwise bits 0-6 = 1 + depth below the water surface
+// in render pixels (capped), bit 7 = fast-moving water (foam).
+let inWin = new Uint8Array(0);
+let depthBuf = new Int16Array(0), rowSum = new Int32Array(0), rowCnt = new Int32Array(0);
+const HOLE_RUN = 3;     // air gaps shorter than this don't count as a surface
+const DEPTH_BLUR = 5;   // horizontal smoothing radius for depth, render px
+
+// Turn the occupancy grid (0 air / 1 water / 2 foam) into the encoded cell
+// bytes, over the whole bounding box so it's continuous across windows.
+function shade(bw, bh, x0, y0, active) {
+  const size = bw * bh;
+  if (inWin.length < size) {
+    inWin = new Uint8Array(occ.length);
+    depthBuf = new Int16Array(occ.length);
+  }
+  if (rowSum.length < bw + 1) { rowSum = new Int32Array(bw + 1); rowCnt = new Int32Array(bw + 1); }
+  inWin.fill(0, 0, size);
+  for (const c of active) {
+    const r = c.rect;
+    for (let y = r.y - y0; y < r.y - y0 + r.h; y++) inWin.fill(1, y * bw + r.x - x0, y * bw + r.x - x0 + r.w);
+  }
+
+  // Close one-pixel gaps between splatted particles.
+  for (let y = 1; y < bh - 1; y++) {
+    for (let x = 1; x < bw - 1; x++) {
+      const k = y * bw + x;
+      if (occ[k] || !inWin[k]) continue;
+      if ((occ[k - 1] && occ[k + 1]) || (occ[k - bw] && occ[k + bw])) occ[k] = 1;
+    }
+  }
+
+  // Depth below the surface, per column. A run of HOLE_RUN air pixels resets
+  // it; wall (outside every window) neither counts nor resets.
+  for (let x = 0; x < bw; x++) {
+    let depth = 0, air = HOLE_RUN;
+    for (let k = x; k < size; k += bw) {
+      if (!inWin[k]) { depthBuf[k] = -1; continue; }
+      if (!occ[k]) {
+        depthBuf[k] = -1;
+        if (++air >= HOLE_RUN) depth = 0; else depth++;
+        continue;
+      }
+      air = 0;
+      depthBuf[k] = depth++;
+    }
+  }
+
+  // Smooth depth sideways (over water pixels only) so cavities and splashes
+  // don't leave hard vertical stripes, then encode.
+  for (let y = 0; y < bh; y++) {
+    const row = y * bw;
+    rowSum[0] = 0; rowCnt[0] = 0;
+    for (let x = 0; x < bw; x++) {
+      const dv = depthBuf[row + x];
+      rowSum[x + 1] = rowSum[x] + (dv >= 0 ? dv : 0);
+      rowCnt[x + 1] = rowCnt[x] + (dv >= 0 ? 1 : 0);
+    }
+    for (let x = 0; x < bw; x++) {
+      const k = row + x, o = occ[k];
+      if (!o || !inWin[k]) { occ[k] = 0; continue; }
+      const a = Math.max(0, x - DEPTH_BLUR), b = Math.min(bw, x + DEPTH_BLUR + 1);
+      // The surface row itself stays exact so the outline/highlight are crisp.
+      const own = depthBuf[k];
+      const avg = own < 2 ? own : Math.round((rowSum[b] - rowSum[a]) / (rowCnt[b] - rowCnt[a]));
+      occ[k] = (1 + Math.min(Math.max(avg, own < 2 ? 0 : 2), 126)) | (o === 2 ? 128 : 0);
+    }
+  }
+}
+
 function render(active) {
   if (!active.length) return;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -564,6 +674,8 @@ function render(active) {
     }
   }
 
+  shade(bw, bh, x0, y0, active);
+
   for (const c of active) {
     const r = c.rect;
     if (!c.ready) continue;
@@ -574,7 +686,7 @@ function render(active) {
     }
     c.ready = false;
     c.port.postMessage(
-      { type: 'frame', w: r.w, h: r.h, cell: CELL, cells, stats: { particles: count, ms: stepMs } },
+      { type: 'frame', x: r.x, y: r.y, w: r.w, h: r.h, cell: CELL, cells, stats: { particles: count, ms: stepMs } },
       [cells.buffer],
     );
   }

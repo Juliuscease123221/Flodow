@@ -8,11 +8,18 @@ const FOAM = 0xfffcf0dc;       // fast-moving water (FLIP only)
 
 // Default is the FLIP particle fluid; ?sim=sand runs the falling-sand automaton.
 // Each script is its own SharedWorker, so the two worlds are separate.
-const SIM = new URLSearchParams(location.search).get('sim') === 'sand' ? 'sand' : 'flip';
+const params = new URLSearchParams(location.search);
+const SIM = params.get('sim') === 'sand' ? 'sand' : 'flip';
 const port = new SharedWorker(SIM === 'flip' ? 'worker-flip.js' : 'worker.js').port;
 const stats = document.getElementById('stats');
 const canvas = document.getElementById('view');
-const ctx = canvas.getContext('2d');
+
+// The pixel-art WebGL renderer needs the FLIP worker's depth data.
+// ?gfx=clear (default) | ocean | basic; basic (or no WebGL2) is the flat 2D one.
+const GFX_STYLES = ['clear', 'ocean', 'basic'];
+const GFX = GFX_STYLES.includes(params.get('gfx')) ? params.get('gfx') : 'clear';
+const water = SIM === 'flip' && GFX !== 'basic' ? createWaterRenderer(canvas, GFX) : null;
+const ctx = water ? null : canvas.getContext('2d');
 let img = null;
 let pending = null;
 let lastRect = '';
@@ -67,6 +74,10 @@ port.onmessage = (e) => {
 };
 
 function draw(f) {
+  if (f.stats) statsText = `${f.stats.particles} particles · ${f.stats.ms.toFixed(1)} ms/step`;
+  showStatus();
+  if (water) { water.draw(f); return; }
+
   if (canvas.width !== f.w || canvas.height !== f.h) {
     canvas.width = f.w;
     canvas.height = f.h;
@@ -79,11 +90,9 @@ function draw(f) {
   const w = f.w;
   for (let k = 0; k < cells.length; k++) {
     const c = cells[k];
-    px[k] = !c ? 0 : c === 2 ? FOAM : k >= w && cells[k - w] ? WATER : SURFACE;
+    px[k] = !c ? 0 : c >= 128 ? FOAM : k >= w && cells[k - w] ? WATER : SURFACE;
   }
   ctx.putImageData(img, 0, 0);
-  if (f.stats) statsText = `${f.stats.particles} particles · ${f.stats.ms.toFixed(1)} ms/step`;
-  showStatus();
 }
 
 function frame() {
@@ -118,6 +127,12 @@ document.getElementById('clear').onclick = () => port.postMessage({ type: 'clear
 const mode = document.getElementById('mode');
 mode.textContent = SIM === 'flip' ? 'Switch to sand' : 'Switch to FLIP';
 mode.href = SIM === 'flip' ? '?sim=sand' : '?sim=flip';
+
+const gfx = document.getElementById('gfx');
+gfx.hidden = SIM !== 'flip';
+const nextGfx = GFX_STYLES[(GFX_STYLES.indexOf(GFX) + 1) % GFX_STYLES.length];
+gfx.textContent = `Graphics: ${GFX} → ${nextGfx}`;
+gfx.href = `?gfx=${nextGfx}`;
 
 addEventListener('pagehide', () => port.postMessage({ type: 'bye' }));
 
